@@ -1,0 +1,141 @@
+use anchor_lang::prelude::*;
+
+declare_id!("YourProgramIdHere"); // Replace with your program ID
+
+#[program]
+pub mod apl_voting {
+    use super::*;
+
+    pub fn create_poll(
+        ctx: Context<CreatePoll>,
+        title: String,
+        options: Vec<String>,
+        duration_hours: i64,
+    ) -> Result<()> {
+        let poll = &mut ctx.accounts.poll;
+
+        poll.creator = ctx.accounts.creator.key();
+        poll.title = title;
+        poll.options = options
+            .into_iter()
+            .map(|name| OptionItem { name, count: 0 })
+            .collect();
+        poll.start_time = Clock::get()?.unix_timestamp;
+        poll.end_time = poll.start_time + (duration_hours * 3600);
+        poll.is_active = true;
+        Ok(())
+    }
+
+    pub fn cast_vote(ctx: Context<CastVote>, choice: String) -> Result<()> {
+        let poll = &mut ctx.accounts.poll;
+        let voter = ctx.accounts.voter.key();
+
+        // Check poll is active
+        let now = Clock::get()?.unix_timestamp;
+        if !poll.is_active || now > poll.end_time {
+            poll.is_active = false;
+            return Err(ErrorCode::PollClosed.into());
+        }
+
+        // Ensure voter hasn't voted
+        if poll.voters.contains(&voter) {
+            return Err(ErrorCode::AlreadyVoted.into());
+        }
+
+        // Find and increment vote
+        let mut found = false;
+        for option in poll.options.iter_mut() {
+            if option.name == choice {
+                option.count += 1;
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            return Err(ErrorCode::InvalidOption.into());
+        }
+
+        poll.voters.push(voter);
+        Ok(())
+    }
+
+    pub fn add_option(ctx: Context<AddOption>, new_option: String) -> Result<()> {
+        let poll = &mut ctx.accounts.poll;
+        if !poll.is_active {
+            return Err(ErrorCode::PollClosed.into());
+        }
+
+        if poll.options.iter().any(|opt| opt.name == new_option) {
+            return Err(ErrorCode::OptionExists.into());
+        }
+
+        poll.options.push(OptionItem {
+            name: new_option,
+            count: 0,
+        });
+
+        Ok(())
+    }
+}
+
+#[derive(Accounts)]
+#[instruction(title: String)]
+pub struct CreatePoll<'info> {
+    #[account(init, payer = creator, space = 8 + Poll::MAX_SIZE, seeds = [b"poll", title.as_bytes()], bump)]
+    pub poll: Account<'info, Poll>,
+    #[account(mut)]
+    pub creator: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct CastVote<'info> {
+    #[account(mut, has_one = creator)]
+    pub poll: Account<'info, Poll>,
+    pub voter: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct AddOption<'info> {
+    #[account(mut, has_one = creator)]
+    pub poll: Account<'info, Poll>,
+    pub creator: Signer<'info>,
+}
+
+#[account]
+pub struct Poll {
+    pub creator: Pubkey,
+    pub title: String,
+    pub options: Vec<OptionItem>,
+    pub voters: Vec<Pubkey>,
+    pub start_time: i64,
+    pub end_time: i64,
+    pub is_active: bool,
+}
+
+impl Poll {
+    pub const MAX_SIZE: usize = 32 + (4 + 64) + (4 + 10 * OptionItem::MAX_SIZE) + (4 + 100 * 32) + 8 + 8 + 1;
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct OptionItem {
+    pub name: String,
+    pub count: u32,
+}
+
+impl OptionItem {
+    pub const MAX_SIZE: usize = 4 + 64 + 4; // string + u32
+}
+
+#[error_code]
+pub enum ErrorCode {
+    #[msg("This poll is closed.")]
+    PollClosed,
+    #[msg("This voter has already voted.")]
+    AlreadyVoted,
+    #[msg("Invalid voting option.")]
+    InvalidOption,
+    #[msg("Option already exists.")]
+    OptionExists,
+}
